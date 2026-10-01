@@ -263,8 +263,10 @@ $("exp").onclick = async () => {
   cv.width = w; cv.height = h;
   const ac = new AudioContext(), dest = ac.createMediaStreamDestination();
   ac.createMediaElementSource(v).connect(dest);
+  // Match the source bitrate (file size / duration) with some headroom, instead of a fixed 8 Mbps cap.
+  const bps = Math.min(5e7, Math.max(8e6, Math.round(file.size * 8 / v.duration * 1.3)));
   const mime = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm"].find(m => MediaRecorder.isTypeSupported(m));
-  const rec = new MediaRecorder(new MediaStream([...cv.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]), { mimeType: mime, videoBitsPerSecond: 8e6 });
+  const rec = new MediaRecorder(new MediaStream([...cv.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]), { mimeType: mime, videoBitsPerSecond: bps, audioBitsPerSecond: 192e3 });
   const chunks = []; rec.ondataavailable = e => chunks.push(e.data);
   rec.onstop = () => { save(new Blob(chunks, { type: mime }), "captioned." + (mime.startsWith("video/mp4") ? "mp4" : "webm")); $("expmsg").textContent = t("done"); $("exp").disabled = false; };
   $("exp").disabled = true; v.pause(); v.currentTime = 0; await new Promise(r => v.onseeked = r);
