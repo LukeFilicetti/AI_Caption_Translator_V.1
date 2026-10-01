@@ -156,23 +156,48 @@ $("file").onchange = e => {
   $("vid").src = URL.createObjectURL(file);
 };
 
-async function audioOf(f) {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    return (await ctx.decodeAudioData(await f.arrayBuffer())).getChannelData(0);
-  } catch { return await listen(f); }
+// Whisper needs 16 kHz mono. Phones are pickier than desktops, so try several ways, simplest first.
+const AC = () => window.AudioContext || window.webkitAudioContext;
+function to16k(buf) { // manual downsample (average each window) for browsers that won't decode at 16 kHz directly
+  const n = buf.numberOfChannels, len = buf.length, ratio = buf.sampleRate / 16000, ch = [];
+  for (let c = 0; c < n; c++) ch.push(buf.getChannelData(c));
+  const out = new Float32Array(Math.floor(len / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const a = Math.floor(i * ratio), b = Math.max(a + 1, Math.min(len, Math.floor((i + 1) * ratio)));
+    let sum = 0; for (let c = 0; c < n; c++) for (let k = a; k < b; k++) sum += ch[c][k];
+    out[i] = sum / ((b - a) * n);
+  }
+  return out;
 }
-async function listen(f) { // fallback for formats the browser can play but not decode directly
-  say(t("rt"));
-  const m = document.createElement("video"); m.src = URL.createObjectURL(f); m.playsInline = true;
-  await new Promise((ok, no) => { m.onloadedmetadata = ok; m.onerror = () => no(new Error(t("cant"))); });
-  const ac = new AudioContext(), d = ac.createMediaStreamDestination(); ac.createMediaElementSource(m).connect(d);
-  const rec = new MediaRecorder(d.stream), ch = []; rec.ondataavailable = e => ch.push(e.data);
-  const done = new Promise(r => rec.onstop = r); m.onended = () => rec.stop();
-  rec.start(); await ac.resume(); await m.play();
-  const tm = setInterval(() => say(t("rtp", { a: Math.round(m.currentTime), b: Math.round(m.duration) })), 500);
-  await done; clearInterval(tm);
-  return (await new AudioContext({ sampleRate: 16000 }).decodeAudioData(await new Blob(ch).arrayBuffer())).getChannelData(0);
+async function decode16k(f) {
+  try { // 1) let the browser decode straight to 16 kHz
+    const ctx = new (AC())({ sampleRate: 16000 }), b = await ctx.decodeAudioData(await f.arrayBuffer());
+    ctx.close?.(); return b.sampleRate === 16000 ? b.getChannelData(0) : to16k(b);
+  } catch (e) { console.warn("16 kHz decode failed, retrying at native rate", e); }
+  const ctx = new (AC())(), b = await ctx.decodeAudioData(await f.arrayBuffer()); // 2) native rate, then downsample ourselves
+  ctx.close?.(); return to16k(b);
+}
+async function audioOf(f) {
+  try { return await decode16k(f); }
+  catch (e) { console.error("Direct audio decode failed", e); return await listen(f, (e && (e.name || e.message)) || "decode"); }
+}
+async function listen(f, why = "") { // last resort: play the video and record its audio in real time
+  say(t("rt") + (why ? " [" + why + "]" : ""));
+  const until = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error(t("cant"))), ms))]);
+  const m = document.createElement("video"); m.playsInline = true; m.setAttribute("playsinline", ""); m.preload = "auto";
+  m.style.cssText = "position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none";
+  document.body.append(m); m.src = URL.createObjectURL(f);
+  try {
+    await until(new Promise((ok, no) => { m.onloadedmetadata = ok; m.onerror = () => no(new Error(t("cant"))); }), 20000);
+    const ac = new (AC())(), d = ac.createMediaStreamDestination(); ac.createMediaElementSource(m).connect(d);
+    if (typeof MediaRecorder === "undefined") throw new Error(t("cant"));
+    const rec = new MediaRecorder(d.stream), ch = []; rec.ondataavailable = e => ch.push(e.data);
+    const done = new Promise(r => rec.onstop = r); m.onended = () => rec.stop();
+    rec.start(); await ac.resume(); await until(m.play(), 15000);
+    const tm = setInterval(() => say(t("rtp", { a: Math.round(m.currentTime), b: Math.round(m.duration) })), 500);
+    await done; clearInterval(tm);
+    return await decode16k(new Blob(ch));
+  } finally { m.remove(); }
 }
 
 async function transcribe(audio) {
