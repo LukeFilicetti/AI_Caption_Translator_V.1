@@ -78,7 +78,7 @@ const WORKER = "https://caption-translate.ai-translation-studio.workers.dev/";
 const LANGS = [["portuguese","pt"],["english","en"],["spanish","es"],["french","fr"],["german","de"],["italian","it"],["japanese","ja"],["korean","ko"],["chinese","zh"],["russian","ru"],["arabic","ar"],["hindi","hi"]];
 // Interface text. Only English is here: other languages are translated once by the Worker (Gemini) and cached on the device.
 // To keep your hand-written pt/es/fr/de/... text, paste your original "pt" and "es" entries into T below, and your original Object.assign(T, {...}) block right after it.
-const T = {"en": {"title": "Translate your video's captions", "sub": "Upload a Reel, pick the languages, and get captions that translate meaning and tone instead of word for word.", "choose": "Choose a video", "from": "Spoken language", "to": "Translate to", "go": "Translate captions", "privacy": "Speech is transcribed on your device. Only the caption text is sent to Google's Gemini API (free tier) for translation, and Google may use it to improve its products.", "cancel": "Cancel", "size": "Size", "lr": "Left / right", "ud": "Up / down", "reset": "Reset", "drag": "You can also drag the caption on the video.", "exp": "Export video with captions", "srt": "Download SRT", "dl": "Downloading speech model (first time only)…", "tr": "Transcribing speech…", "reading": "Reading audio…", "rt": "Reading audio in real time. Keep this tab open…", "rtp": "Reading audio in real time… {a}s of {b}s", "transl": "Translating with Gemini…", "rate": "Rate limits have been reached for the minute. Please wait a moment for them to recover. Translation paused until rates recover. Resuming in {s}s…", "nospeech": "No speech found in this video.", "fail": "Translation failed ({n}). Refresh and try again.", "err": "Something went wrong. Refresh to try again.", "cant": "This browser can't read the audio of this video.", "exping": "Exporting in real time. Keep this tab open until it finishes.", "done": "Done. Your video was saved.", "sv": "Save video", "ready": "Your video is ready. Tap Save video."}};
+const T = {"en": {"title": "Translate your video's captions", "sub": "Upload a Reel, pick the languages, and get captions that translate meaning and tone instead of word for word.", "choose": "Choose a video", "from": "Spoken language", "to": "Translate to", "go": "Translate captions", "privacy": "Speech is transcribed on your device. Only the caption text is sent to Google's Gemini API (free tier) for translation, and Google may use it to improve its products.", "cancel": "Cancel", "size": "Size", "lr": "Left / right", "ud": "Up / down", "reset": "Reset", "drag": "You can also drag the caption on the video.", "exp": "Export video with captions", "srt": "Download SRT", "dl": "Downloading speech model (first time only)…", "tr": "Transcribing speech…", "reading": "Reading audio…", "rt": "Reading audio in real time. Keep this tab open…", "rtp": "Reading audio in real time… {a}s of {b}s", "transl": "Translating with Gemini…", "rate": "Rate limits have been reached for the minute. Please wait a moment for them to recover. Translation paused until rates recover. Resuming in {s}s…", "nospeech": "No speech found in this video.", "fail": "Translation failed ({n}). Refresh and try again.", "err": "Something went wrong. Refresh to try again.", "cant": "This browser can't read the audio of this video.", "exping": "Exporting in real time. Keep this tab open and the screen on until it finishes.", "done": "Done. Your video was saved.", "sv": "Save video", "ready": "Your video is ready. Tap Save video."}};
 const $ = id => document.getElementById(id);
 let L = "en";
 const t = (k, v = {}) => (T[L]?.[k] ?? T.en[k]).replace(/\{(\w+)\}/g, (_, n) => v[n] ?? "");
@@ -352,16 +352,17 @@ function caption(x, t, w, h) {
 }
 
 $("exp").onclick = async () => {
-  const v = $("vid"), w = v.videoWidth, h = v.videoHeight, cv = document.createElement("canvas"), x = cv.getContext("2d");
-  cv.width = w; cv.height = h;
+  const v = $("vid"), sc = Math.min(1, 1280 / Math.max(v.videoWidth, v.videoHeight)), w = Math.round(v.videoWidth * sc) & ~1, h = Math.round(v.videoHeight * sc) & ~1;
+  const cv = document.createElement("canvas"), x = cv.getContext("2d"); cv.width = w; cv.height = h; // capped at 1280 px so phone encoders keep up
   const ac = new AudioContext(), dest = ac.createMediaStreamDestination();
   ac.createMediaElementSource(v).connect(dest);
-  // Match the source bitrate (file size / duration) with some headroom, instead of a fixed 8 Mbps cap.
-  const bps = Math.min(5e7, Math.max(8e6, Math.round(file.size * 8 / v.duration * 1.3)));
+  const bps = Math.min(12e6, Math.max(5e6, Math.round(file.size * 8 / v.duration * 1.3)));
   const mime = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm"].find(m => MediaRecorder.isTypeSupported(m));
   const rec = new MediaRecorder(new MediaStream([...cv.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]), { mimeType: mime, videoBitsPerSecond: bps, audioBitsPerSecond: 192e3 });
-  const chunks = []; rec.ondataavailable = e => chunks.push(e.data);
+  let wl, iv; try { wl = await navigator.wakeLock?.request("screen"); } catch {} // a locked screen freezes the picture while the audio keeps going
+  const chunks = []; rec.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
   rec.onstop = () => {
+    clearInterval(iv); try { wl?.release(); } catch {}
     const blob = new Blob(chunks, { type: mime }), name = "captioned." + (mime.startsWith("video/mp4") ? "mp4" : "webm"), out = new File([blob], name, { type: mime.split(";")[0] });
     $("sv").hidden = false;
     $("sv").onclick = async () => { // phones need the share sheet (a fresh tap) to put the video in Photos
@@ -373,7 +374,8 @@ $("exp").onclick = async () => {
   };
   $("exp").disabled = true; $("sv").hidden = true; v.pause(); v.currentTime = 0; await new Promise(r => v.onseeked = r);
   $("expmsg").textContent = t("exping");
-  const draw = () => { x.drawImage(v, 0, 0, w, h); const s = at(v.currentTime); if (s) caption(x, s.text, w, h); if (!v.ended) requestAnimationFrame(draw); };
-  v.onended = () => rec.stop(); rec.start(); await ac.resume(); await v.play(); draw();
+  const draw = () => { x.drawImage(v, 0, 0, w, h); const s = at(v.currentTime); if (s) caption(x, s.text, w, h); };
+  iv = setInterval(draw, 33); // a timer keeps drawing even when the browser slows animation frames
+  v.onended = () => rec.stop(); rec.start(1000); await ac.resume(); await v.play(); draw();
 };
 </script></body></html>
