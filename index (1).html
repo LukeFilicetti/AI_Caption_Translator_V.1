@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Caption Translator</title>
+<link href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#14181f;--paper:#f2f4f7;--line:#c9d0da;--acc:#2f3fd0;--hi:#ffd84d}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:500 16px/1.5 "Familjen Grotesk",system-ui,sans-serif}
+main{max-width:680px;margin:0 auto;padding:32px 20px 64px}
+h1{font-size:clamp(28px,6vw,40px);line-height:1.1;margin:0 0 8px}
+.sub{margin:0 0 28px;color:#4a5361}
+section{margin-bottom:24px}
+[hidden]{display:none!important}
+.drop{display:block;border:2px dashed var(--ink);border-radius:6px;padding:36px 16px;text-align:center;cursor:pointer;font-size:18px;font-weight:700}
+.drop:hover,.drop:focus-within{background:var(--hi)}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin:16px 0}
+.row label{flex:1;min-width:150px;display:flex;flex-direction:column;gap:4px;font-size:14px}
+select,input[type=text]{font:inherit;padding:10px;border:1.5px solid var(--ink);border-radius:4px;background:#fff;width:100%}
+button{font:700 16px inherit;font-family:inherit;padding:12px 20px;border:2px solid var(--ink);border-radius:4px;background:var(--acc);color:#fff;cursor:pointer}
+button:disabled{opacity:.4;cursor:not-allowed}
+button.ghost{background:transparent;color:var(--ink)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:3px solid var(--hi);outline-offset:2px}
+.note{font-size:13px;color:#4a5361}
+progress{width:100%;height:10px}
+.stage{position:relative;background:#000;border-radius:6px;overflow:hidden;max-width:360px;margin:0 auto 16px}
+.stage video{width:100%;display:block;max-height:70vh}
+#cap{position:absolute;left:6%;right:6%;bottom:22%;text-align:center;color:#fff;font-weight:700;font-size:18px;line-height:1.25;text-shadow:0 0 4px #000,0 0 4px #000,0 0 2px #000;pointer-events:none}
+ol{list-style:none;padding:0;margin:0 0 16px;display:grid;gap:8px}
+li{display:flex;gap:8px;align-items:center}
+button.t{padding:8px 10px;font-size:13px;background:#fff;color:var(--ink);min-width:72px}
+@media(prefers-reduced-motion:no-preference){.drop{transition:background .15s}}
+</style></head><body><main>
+<h1>Translate your video's captions</h1>
+<p class="sub">Upload a Reel, pick the languages, and get captions that translate meaning and tone instead of word for word.</p>
+
+<section id="setup">
+  <label class="drop"><input type="file" id="file" accept="video/*" hidden><span id="fname">Choose a video</span></label>
+  <div class="row">
+    <label>Spoken language<select id="from"></select></label>
+    <label>Translate to<select id="to"></select></label>
+  </div>
+  <button id="go" disabled>Translate captions</button>
+  <p class="note">Speech is transcribed on your device. Only the caption text is sent to Google's Gemini API (free tier) for translation, and Google may use it to improve its products.</p>
+</section>
+
+<section id="status" hidden>
+  <p id="msg" role="status"></p>
+  <progress id="bar" max="100" hidden></progress>
+  <button id="cancel" class="ghost">Cancel</button>
+</section>
+
+<section id="result" hidden>
+  <div class="stage"><video id="vid" controls playsinline></video><div id="cap"></div></div>
+  <ol id="list"></ol>
+  <div class="row"><button id="exp">Export video with captions</button><button id="srt" class="ghost">Download SRT</button></div>
+  <p id="expmsg" class="note" role="status"></p>
+</section>
+</main>
+
+<script type="module">
+// 1) After deploying the Cloudflare Worker, paste its URL here:
+const WORKER = "https://caption-translate.ai-translation-studio.workers.dev/";
+
+const LANGS = [["portuguese","Portuguese"],["english","English"],["spanish","Spanish"],["french","French"],["german","German"],["italian","Italian"],["japanese","Japanese"],["korean","Korean"],["chinese","Chinese"],["russian","Russian"],["arabic","Arabic"],["hindi","Hindi"]];
+const $ = id => document.getElementById(id);
+for (const id of ["from","to"]) $(id).innerHTML = LANGS.map(([v,n]) => `<option value="${v}">${n}</option>`).join("");
+$("from").value = "portuguese"; $("to").value = "english";
+
+let file, segs = [], asr;
+const show = (id, v) => $(id).hidden = !v;
+const say = (t, p) => { $("msg").textContent = t; $("bar").hidden = p == null; if (p != null) $("bar").value = p; };
+$("cancel").onclick = () => location.reload();
+
+$("file").onchange = e => {
+  file = e.target.files[0]; if (!file) return;
+  $("fname").textContent = file.name; $("go").disabled = false;
+  $("vid").src = URL.createObjectURL(file);
+};
+
+async function audioOf(f) {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+  return (await ctx.decodeAudioData(await f.arrayBuffer())).getChannelData(0);
+}
+
+async function transcribe(audio) {
+  const { pipeline } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3");
+  const gpu = !!navigator.gpu;
+  asr = await pipeline("automatic-speech-recognition", "onnx-community/whisper-base", {
+    device: gpu ? "webgpu" : "wasm",
+    dtype: gpu ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q8",
+    progress_callback: p => { if (p.status === "progress") say("Downloading speech model (first time only)…", p.progress); }
+  });
+  say("Transcribing speech…");
+  const out = await asr(audio, { language: $("from").value, task: "transcribe", chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
+  return out.chunks.map(c => ({ s: c.timestamp[0], e: c.timestamp[1] ?? c.timestamp[0] + 2, src: c.text.trim(), text: "" })).filter(x => x.src);
+}
+
+const wait = async s => {
+  for (; s > 0; s--) {
+    say(`Rate limits have been reached for the minute. Please wait a moment for them to recover. Translation paused until rates recover. Resuming in ${s}s…`);
+    await new Promise(r => setTimeout(r, 1000));
+  }
+};
+
+async function translate() {
+  for (;;) {
+    const r = await fetch(WORKER, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from: $("from").value, to: $("to").value, lines: segs.map(s => s.src) }) });
+    if (r.status === 429) { await wait((await r.json().catch(() => ({}))).retry || 60); continue; }
+    if (!r.ok) throw new Error("Translation failed (" + r.status + "). Refresh and try again.");
+    return (await r.json()).lines;
+  }
+}
+
+$("go").onclick = async () => {
+  if (WORKER.startsWith("PASTE")) { alert("Set the WORKER URL at the top of the script first."); return; }
+  show("setup", 0); show("status", 1); say("Reading audio…");
+  try {
+    segs = await transcribe(await audioOf(file));
+    if (!segs.length) throw new Error("No speech found in this video.");
+    say("Translating with Gemini…");
+    const t = await translate();
+    segs.forEach((s, i) => s.text = t[i] || s.src);
+    render(); show("status", 0); show("result", 1);
+  } catch (e) { say(e.message || "Something went wrong. Refresh to try again."); $("bar").hidden = true; }
+};
+
+const fmt = t => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+function render() {
+  $("list").innerHTML = "";
+  segs.forEach(s => {
+    const li = document.createElement("li"), b = document.createElement("button"), i = document.createElement("input");
+    b.className = "t"; b.textContent = fmt(s.s); b.onclick = () => { $("vid").currentTime = s.s; $("vid").play(); };
+    i.type = "text"; i.value = s.text; i.oninput = () => s.text = i.value;
+    li.append(b, i); $("list").append(li);
+  });
+}
+const at = t => segs.find(s => t >= s.s && t < s.e);
+$("vid").ontimeupdate = () => $("cap").textContent = at($("vid").currentTime)?.text || "";
+
+const ts = t => { const m = Math.round(t * 1000), p = (n, l = 2) => String(n).padStart(l, "0");
+  return `${p(m / 36e5 | 0)}:${p(m / 6e4 % 60 | 0)}:${p(m / 1e3 % 60 | 0)},${p(m % 1e3, 3)}`; };
+const save = (blob, name) => { const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name; a.click(); };
+$("srt").onclick = () => save(new Blob([segs.map((s, i) => `${i + 1}\n${ts(s.s)} --> ${ts(s.e)}\n${s.text}\n`).join("\n")], { type: "text/plain" }), "captions.srt");
+
+function caption(x, t, w, h) {
+  const f = Math.round(h > w ? w * .065 : h * .06);
+  x.font = `800 ${f}px system-ui,sans-serif`; x.textAlign = "center"; x.lineJoin = "round"; x.lineWidth = f / 5;
+  x.strokeStyle = "#000"; x.fillStyle = "#fff";
+  const ls = []; let c = "";
+  for (const q of t.split(" ")) { const n = c ? c + " " + q : q; if (x.measureText(n).width > w * .86 && c) { ls.push(c); c = q; } else c = n; }
+  ls.push(c);
+  let y = h * .78 - (ls.length - 1) * f * 1.2;
+  for (const l of ls) { x.strokeText(l, w / 2, y); x.fillText(l, w / 2, y); y += f * 1.2; }
+}
+
+$("exp").onclick = async () => {
+  const v = $("vid"), w = v.videoWidth, h = v.videoHeight, cv = document.createElement("canvas"), x = cv.getContext("2d");
+  cv.width = w; cv.height = h;
+  const ac = new AudioContext(), dest = ac.createMediaStreamDestination();
+  ac.createMediaElementSource(v).connect(dest);
+  const mime = ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm"].find(m => MediaRecorder.isTypeSupported(m));
+  const rec = new MediaRecorder(new MediaStream([...cv.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]), { mimeType: mime, videoBitsPerSecond: 8e6 });
+  const chunks = []; rec.ondataavailable = e => chunks.push(e.data);
+  rec.onstop = () => { save(new Blob(chunks, { type: mime }), "captioned." + (mime.startsWith("video/mp4") ? "mp4" : "webm")); $("expmsg").textContent = "Done. Your video was saved."; $("exp").disabled = false; };
+  $("exp").disabled = true; v.pause(); v.currentTime = 0; await new Promise(r => v.onseeked = r);
+  $("expmsg").textContent = "Exporting in real time. Keep this tab open until it finishes.";
+  const draw = () => { x.drawImage(v, 0, 0, w, h); const s = at(v.currentTime); if (s) caption(x, s.text, w, h); if (!v.ended) requestAnimationFrame(draw); };
+  v.onended = () => rec.stop(); rec.start(); await ac.resume(); await v.play(); draw();
+};
+</script></body></html>
