@@ -200,7 +200,7 @@ async function translate() {
     const r = await fetch(WORKER, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ from: $("from").value, to: $("to").value, lines: segs.map(s => s.src) }) });
     if (r.status === 429) { await wait((await r.json().catch(() => ({}))).retry || 60); continue; }
-    if (!r.ok) throw new Error(t("fail", { n: r.status }));
+    if (!r.ok) { console.error("Worker error", r.status, await r.text().catch(() => "")); throw new Error(t("fail", { n: r.status })); }
     return (await r.json()).lines;
   }
 }
