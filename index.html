@@ -148,7 +148,7 @@ let file, segs = [], asr;
   const nl = (navigator.language || "en").slice(0, 2); setLang(LANGS.some(x => x[1] === sv) ? sv : T[nl] ? nl : "en"); }
 const show = (id, v) => $(id).hidden = !v;
 const say = (t, p) => { $("msg").textContent = t; $("bar").hidden = p == null; if (p != null) $("bar").value = p; };
-$("cancel").onclick = () => location.reload();
+$("cancel").onclick = () => { try { localStorage.removeItem("asr_busy"); } catch {} location.reload(); };
 
 $("file").onchange = e => {
   file = e.target.files[0]; if (!file) return;
@@ -197,20 +197,36 @@ async function listen(f, why = "") { // last resort: play the video and record i
     const tm = setInterval(() => say(t("rtp", { a: Math.round(m.currentTime), b: Math.round(m.duration) })), 500);
     await done; clearInterval(tm);
     return await decode16k(new Blob(ch));
-  } finally { m.remove(); }
+  } finally { URL.revokeObjectURL(m.src); m.remove(); }
 }
+
+// Speech models, biggest to smallest. Phones start one step down; if a tab ever crashes mid-load, the next try steps down again.
+const ASR = ["onnx-community/whisper-small", "onnx-community/whisper-base", "onnx-community/whisper-tiny"];
+const isPhone = () => /iPhone|iPad|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform || navigator.userAgent));
+function pickModel() {
+  let i, busy; try { i = parseInt(localStorage.getItem("asr_idx")); busy = localStorage.getItem("asr_busy"); } catch {}
+  if (!(i >= 0 && i < ASR.length)) i = isPhone() ? 1 : 0;
+  if (busy != null) i = Math.min(ASR.length - 1, (parseInt(busy) || 0) + 1); // last attempt never finished = the tab crashed
+  try { localStorage.setItem("asr_idx", i); localStorage.setItem("asr_busy", i); } catch {}
+  return i;
+}
+const asrDone = () => { try { localStorage.removeItem("asr_busy"); } catch {} };
+addEventListener("pagehide", e => { if (!e.persisted) asrDone(); }); // a normal refresh is not a crash
 
 async function transcribe(audio) {
   const { pipeline } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3");
-  const gpu = !!navigator.gpu;
-  asr = await pipeline("automatic-speech-recognition", "onnx-community/whisper-small", {
+  const i = pickModel(), gpu = !!navigator.gpu && i === 0 && !isPhone();
+  console.log("Speech model:", ASR[i]);
+  asr = await pipeline("automatic-speech-recognition", ASR[i], {
     device: gpu ? "webgpu" : "wasm",
     dtype: gpu ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q8",
     progress_callback: p => { if (p.status === "progress") say(t("dl"), p.progress); }
   });
   say(t("tr"));
-  const out = await asr(audio, { language: $("from").value, task: "transcribe", chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
-  return out.chunks.map(c => ({ s: c.timestamp[0], e: c.timestamp[1] ?? c.timestamp[0] + 2, src: c.text.trim(), text: "" })).filter(x => x.src);
+  try {
+    const out = await asr(audio, { language: $("from").value, task: "transcribe", chunk_length_s: 30, stride_length_s: 5, return_timestamps: true });
+    return out.chunks.map(c => ({ s: c.timestamp[0], e: c.timestamp[1] ?? c.timestamp[0] + 2, src: c.text.trim(), text: "" })).filter(x => x.src);
+  } finally { asrDone(); }
 }
 
 const wait = async s => {
