@@ -188,26 +188,30 @@ function loadScript(src) {
 async function aacOf(f) { // pull the AAC track out of the MP4/MOV and wrap it as ADTS so the browser can decode it fast
   if (!window.MP4Box) await loadScript("https://cdn.jsdelivr.net/npm/mp4box@0.5.2/dist/mp4box.all.min.js");
   const buf = await f.arrayBuffer(); buf.fileStart = 0;
-  const mp4 = MP4Box.createFile(), parts = []; let tr, err;
+  const mp4 = MP4Box.createFile(), parts = []; let tr, cfg, err;
   mp4.onError = e => err = e;
   mp4.onReady = info => {
-    tr = info.audioTracks[0];
-    if (!tr || tr.codec !== "mp4a.40.2") return;
+    tr = info.audioTracks[0]; if (!tr) return;
+    let a; // read the AAC settings from the file's own esds box (the codec string can be a bare "mp4a" on iPhone files)
+    try { a = mp4.getTrackById(tr.id).mdia.minf.stbl.stsd.entries[0].esds.esd.descs[0].descs[0].data; } catch {}
+    cfg = a && a.length > 1
+      ? { o: a[0] >> 3, r: ((a[0] & 7) << 1) | (a[1] >> 7), c: ((a[1] >> 3) & 15) || tr.audio.channel_count }
+      : { o: 2, r: ADTS_RATES.indexOf(tr.audio.sample_rate), c: tr.audio.channel_count };
+    if (cfg.o < 1 || cfg.o > 4 || cfg.r < 0 || cfg.r > 12 || !(cfg.c > 0 && cfg.c < 8)) return;
     mp4.setExtractionOptions(tr.id, null, { nbSamples: 1000 }); mp4.start();
   };
   mp4.onSamples = (id, user, samples) => {
-    const ch = tr.audio.channel_count, r = ADTS_RATES.indexOf(tr.audio.sample_rate);
     for (const s of samples) {
       const n = s.size + 7, h = new Uint8Array(7);
-      h[0] = 0xFF; h[1] = 0xF1; h[2] = (1 << 6) | (r << 2) | (ch >> 2);
-      h[3] = ((ch & 3) << 6) | (n >> 11); h[4] = (n >> 3) & 255; h[5] = ((n & 7) << 5) | 0x1F; h[6] = 0xFC;
+      h[0] = 0xFF; h[1] = 0xF1; h[2] = ((cfg.o - 1) << 6) | (cfg.r << 2) | (cfg.c >> 2);
+      h[3] = ((cfg.c & 3) << 6) | (n >> 11); h[4] = (n >> 3) & 255; h[5] = ((n & 7) << 5) | 0x1F; h[6] = 0xFC;
       parts.push(h, s.data);
     }
   };
   mp4.appendBuffer(buf); mp4.flush();
   if (err) throw new Error("mp4 parse error");
-  if (!tr || tr.codec !== "mp4a.40.2") throw new Error("audio is not AAC-LC (" + (tr ? tr.codec : "no audio track") + ")");
-  if (ADTS_RATES.indexOf(tr.audio.sample_rate) < 0 || !parts.length) throw new Error("no usable audio samples");
+  if (!tr) throw new Error("no audio track");
+  if (!cfg || !parts.length) throw new Error("unsupported audio (" + tr.codec + ", object " + (cfg && cfg.o) + ", rate " + (cfg && cfg.r) + ", ch " + (cfg && cfg.c) + ")");
   return new Blob(parts, { type: "audio/aac" });
 }
 async function audioOf(f) {
@@ -217,7 +221,7 @@ async function audioOf(f) {
   catch (e2) { // slow last resort; the bracket shows why both fast paths failed
     console.warn("AAC extraction failed", e2);
     const n = e => e && (e.name && e.name !== "Error" ? e.name + ": " : "") + (e.message || "");
-    return await listen(f, "v3 direct: " + n(e1) + " | aac: " + n(e2));
+    return await listen(f, "v4 direct: " + n(e1) + " | aac: " + n(e2));
   }
 }
 async function listen(f, why = "") { // last resort: play the video and record its audio in real time
