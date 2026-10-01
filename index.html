@@ -86,7 +86,7 @@ async function audioOf(f) {
 async function transcribe(audio) {
   const { pipeline } = await import("https://cdn.jsdelivr.net/npm/@huggingface/transformers@3");
   const gpu = !!navigator.gpu;
-  asr = await pipeline("automatic-speech-recognition", "onnx-community/whisper-base", {
+  asr = await pipeline("automatic-speech-recognition", "onnx-community/whisper-small", {
     device: gpu ? "webgpu" : "wasm",
     dtype: gpu ? { encoder_model: "fp32", decoder_model_merged: "q4" } : "q8",
     progress_callback: p => { if (p.status === "progress") say("Downloading speech model (first time only)…", p.progress); }
