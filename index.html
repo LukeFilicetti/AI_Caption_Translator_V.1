@@ -211,9 +211,14 @@ async function aacOf(f) { // pull the AAC track out of the MP4/MOV and wrap it a
   return new Blob(parts, { type: "audio/aac" });
 }
 async function audioOf(f) {
-  try { return await decode16k(f); } catch (e) { console.warn("Direct audio decode failed", e); }
+  let e1;
+  try { return await decode16k(f); } catch (e) { e1 = e; console.warn("Direct audio decode failed", e); }
   try { return await decode16k(await aacOf(f)); }
-  catch (e) { console.warn("AAC extraction failed", e); return await listen(f, (e && (e.name || e.message)) || "decode"); } // slow last resort
+  catch (e2) { // slow last resort; the bracket shows why both fast paths failed
+    console.warn("AAC extraction failed", e2);
+    const n = e => e && (e.name || e.message);
+    return await listen(f, "v2 direct: " + n(e1) + " | aac: " + n(e2));
+  }
 }
 async function listen(f, why = "") { // last resort: play the video and record its audio in real time
   say(t("rt") + (why ? " [" + why + "]" : ""));
