@@ -200,7 +200,11 @@ async function translate() {
     const r = await fetch(WORKER, { method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ from: $("from").value, to: $("to").value, lines: segs.map(s => s.src) }) });
     if (r.status === 429) { await wait((await r.json().catch(() => ({}))).retry || 60); continue; }
-    if (!r.ok) { console.error("Worker error", r.status, await r.text().catch(() => "")); throw new Error(t("fail", { n: r.status })); }
+    if (!r.ok) {
+      const body = await r.text().catch(() => ""); console.error("Worker error", r.status, body);
+      let d = ""; try { const o = JSON.parse(body); d = [o.error, o.status, o.finishReason, o.detail || o.raw, o.got != null ? o.got + "/" + o.expected + " lines" : "", o.ms != null ? o.ms + "ms" : ""].filter(Boolean).join(" | "); } catch { d = body.slice(0, 200); }
+      throw new Error(t("fail", { n: r.status }) + (d ? " [" + d + "]" : ""));
+    }
     return (await r.json()).lines;
   }
 }
